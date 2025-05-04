@@ -67,7 +67,7 @@ def get_base_url(url):
     base_url = f"{parsed_url.scheme}://{parsed_url.netloc}/"
     return base_url
 
-def scrape_all_urls(driver, product_name, first_run):
+def scrape_all_urls(driver, product_name, first_run, target_country=None):
     """
     Scrapes all URLs from Google Shopping results for a given product name.
     """
@@ -89,7 +89,7 @@ def scrape_all_urls(driver, product_name, first_run):
             pass
         
         # Try to detect country from the Google homepage
-        country = "Slovakia"  # Default country
+        country = target_country  # Use target_country if provided
         try:
             # Wait for the country element to be visible
             WebDriverWait(driver, 5).until(
@@ -101,7 +101,7 @@ def scrape_all_urls(driver, product_name, first_run):
                 print(f"Detected country from Google homepage: {detected_country}")
                 country = detected_country
         except Exception as e:
-            print(f"Could not detect country, using default: {country}. Error: {str(e)}")
+            print(f"Could not detect country. Error: {str(e)}")
             
         # Check for CAPTCHA
         if handle_captcha(driver):
@@ -125,60 +125,17 @@ def scrape_all_urls(driver, product_name, first_run):
         )
         time.sleep(random.uniform(0.3, 0.8))
 
-        # Attempt to find shopping tab and click it if available
-        try:
-            shopping_tab = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.XPATH, "//a[contains(@href, 'tbm=shop') or contains(text(), 'Shopping')]"))
-            )
-            print("Found Shopping tab, clicking it...")
-            shopping_tab.click()
-            time.sleep(random.uniform(0.5, 1.5))
-        except Exception as e:
-            print(f"No Shopping tab found or couldn't click it: {str(e)}")
-
-        # Collect all URLs inside 'pla-unit-container'
-        print("Collecting all URLs inside 'pla-unit-container'...") 
+        # No longer clicking on Shopping tab - staying on main search results page
+        print("Staying on main search results page (not clicking Shopping tab)")
+        
+        # Check for shopping containers in the main search results
+        print("Collecting all URLs from shopping containers...") 
         page_source = driver.page_source
         soup = BeautifulSoup(page_source, 'html.parser')
         
         # Find all shopping containers
         shopping_containers = soup.find_all("div", {"class": "pla-unit-container"})
         print(f"Found {len(shopping_containers)} shopping containers")
-        
-        # If no shopping containers found, try to search with "buy" keyword
-        if len(shopping_containers) == 0 and "buy" not in product_name.lower():
-            print("No shopping results found. Trying with 'buy' keyword...")
-            search_box = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.NAME, "q"))
-            )
-            search_box.clear()
-            search_box.send_keys(f"buy {product_name}")
-            search_box.send_keys(Keys.RETURN)
-            
-            # Wait for search results to load
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.ID, "search"))
-            )
-            time.sleep(random.uniform(0.3, 0.8))
-            
-            # Try to click shopping tab again
-            try:
-                shopping_tab = WebDriverWait(driver, 5).until(
-                    EC.presence_of_element_located((By.XPATH, "//a[contains(@href, 'tbm=shop') or contains(text(), 'Shopping')]"))
-                )
-                print("Found Shopping tab, clicking it...")
-                shopping_tab.click()
-                time.sleep(random.uniform(0.5, 1.5))
-            except Exception as e:
-                print(f"No Shopping tab found or couldn't click it: {str(e)}")
-            
-            # Get updated page source
-            page_source = driver.page_source
-            soup = BeautifulSoup(page_source, 'html.parser')
-            
-            # Find all shopping containers again
-            shopping_containers = soup.find_all("div", {"class": "pla-unit-container"})
-            print(f"Found {len(shopping_containers)} shopping containers after adding 'buy' keyword")
         
         # Create a DataFrame to store the results
         results = []
@@ -262,8 +219,14 @@ def scrape_all_urls(driver, product_name, first_run):
                         # Print the found e-shop
                         print(f"FOUND E-SHOP: {domain}, Base URL: {base_url}, Merchant: {merchant_name}, Comparison Service: {comparison_service}, Country: {country}")
                         
-                        # Send lead to CSS Leads API
-                        send_lead_to_api(country, base_url, "", comparison_service)
+                        # Send lead to CSS Leads API only if comparison_service is not "Unknown" and country is available
+                        if comparison_service != "Unknown" and country:
+                            send_lead_to_api(country, base_url, "", comparison_service)
+                            print(f"LEAD SENT TO API: {domain}, Comparison Service: {comparison_service}")
+                        elif not country:
+                            print(f"SKIPPING LEAD (No country detected): {domain}")
+                        else:
+                            print(f"SKIPPING LEAD (Unknown comparison service): {domain}")
         
         # Create DataFrame from results
         df = pd.DataFrame(results)
@@ -279,13 +242,12 @@ def scrape_all_urls(driver, product_name, first_run):
         print(f"An error occurred: {e}")
         return pd.DataFrame([], columns=['url', 'merchant', 'comparison_service', 'country'])
 
-def initialize_browser():
+def initialize_browser(target_country=None):
     """
     Initialize Chrome browser with appropriate options.
     """
     try:
-        # Try regular ChromeDriver first since undetected_chromedriver has compatibility issues
-        print("Initializing regular ChromeDriver...")
+        # Create browser with stealth mode
         options = Options()
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
@@ -293,64 +255,179 @@ def initialize_browser():
         options.add_argument("--disable-extensions")
         options.add_argument("--disable-notifications")
         options.add_argument("--disable-popup-blocking")
-        options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
+        options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6723.92 Safari/537.36")
         
+        # Add experimental options to avoid detection
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+        
+        # Initialize Chrome driver
         service = ChromeService(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
         driver.set_window_size(1920, 1080)
         
+        # Execute CDP commands to avoid detection
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": """
+            // Overwrite the 'webdriver' property to undefined
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+            
+            // Overwrite the plugins array with a fake one
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+            });
+            
+            // Overwrite the languages property
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['en-US', 'en', 'es']
+            });
+            """
+        })
+        
+        print(f"Successfully initialized Chrome for {target_country}")
         return driver
     except Exception as e:
-        logger.error(f"Error initializing regular ChromeDriver: {e}")
-        print(f"Error initializing regular ChromeDriver: {e}")
+        logger.error(f"Critical error in initialize_browser: {e}")
+        print(f"Critical error in initialize_browser: {e}")
         
-        # Fallback to undetected_chromedriver
-        print("Falling back to undetected_chromedriver...")
-        try:
-            options = uc.ChromeOptions()
-            options.add_argument("--no-sandbox")
-            options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--disable-blink-features=AutomationControlled")
-            options.add_argument("--disable-extensions")
-            options.add_argument("--disable-notifications")
-            options.add_argument("--disable-popup-blocking")
-            
-            # Add user agent
-            options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
-            
-            # Create the undetected ChromeDriver
-            driver = uc.Chrome(options=options)
-            
-            # Set window size
-            driver.set_window_size(1920, 1080)
-            
-            return driver
-        except Exception as e:
-            logger.error(f"Error initializing undetected_chromedriver: {e}")
-            print(f"Error initializing undetected_chromedriver: {e}")
-            raise
+        # Last resort fallback
+        print("Critical error occurred. Using basic Chrome without any customization...")
+        options = Options()
+        service = ChromeService(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+        print("WARNING: Running with basic Chrome configuration. No customization.")
+        return driver
+
+def is_browser_responsive(driver):
+    """
+    Check if the browser is responsive by trying to get the current URL.
+    Returns True if responsive, False otherwise.
+    """
+    try:
+        driver.current_url
+        return True
+    except Exception:
+        return False
+
+def is_browser_stuck(driver, start_time, timeout=60):
+    """
+    Check if the browser has been on the same page for too long.
+    Returns True if stuck, False otherwise.
+    """
+    if time.time() - start_time > timeout:
+        print(f"Browser appears to be stuck on {driver.current_url} for more than {timeout} seconds")
+        return True
+    return False
 
 def main():
     try:
+        # Choose a target country for this instance
+        target_country = random.choice([
+            "Austria", "Belgium", "Czechia", "Denmark", "Finland", "France", 
+            "Germany", "Greece", "Hungary", "Ireland", "Italy", "Netherlands", 
+            "Norway", "Poland", "Portugal", "Romania", "Slovakia", "Spain", 
+            "Sweden", "Switzerland", "United Kingdom"
+        ])
+        print(f"Selected target country for this instance: {target_country}")
+        
+        # Track countries we've already tried in this session to avoid immediate repeats
+        tried_countries = set([target_country])
+        
         while True:  # Run indefinitely
             print("\n" + "="*50)
-            print(f"Starting new scraping cycle at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"Starting new scraping cycle at {time.strftime('%Y-%m-%d %H:%M:%S')} for {target_country}")
             print("="*50 + "\n")
             
             # Read products from file (get a fresh random selection each cycle)
             products = read_products(f"{ACTUAL_FOLDER}/product-categories.txt")
             
+            # Track when the current page was loaded
+            page_start_time = time.time()
+            first_run = True
+            
             # Initialize browser
             driver = None
             try:
-                driver = initialize_browser()
-                first_run = True
+                driver = initialize_browser(target_country)
+                
+                # Counter for consecutive searches with no results
+                no_results_counter = 0
                 
                 # Process each product
                 for product_name in products:
                     try:
+                        # Check if browser is responsive and not stuck
+                        if not is_browser_responsive(driver) or is_browser_stuck(driver, page_start_time):
+                            print("Browser is unresponsive or stuck. Restarting browser...")
+                            if driver:
+                                try:
+                                    driver.quit()
+                                except:
+                                    pass  # Ignore errors when trying to quit a dead browser
+                            driver = initialize_browser(target_country)
+                            first_run = True
+                            page_start_time = time.time()
+                        
                         # Scrape URLs from Google Shopping
-                        urls = scrape_all_urls(driver, product_name, first_run)
+                        urls = scrape_all_urls(driver, product_name, first_run, target_country)
+                        
+                        # Check if we found any results
+                        if urls.empty:
+                            no_results_counter += 1
+                            print(f"No results found for this product. Consecutive searches with no results: {no_results_counter}")
+                            
+                            # If we've had 10 consecutive searches with no results, get a new set of products
+                            if no_results_counter >= 10:
+                                print("\n" + "="*50)
+                                print(f"No results found in {no_results_counter} consecutive searches. Getting a new set of products.")
+                                print("="*50 + "\n")
+                                
+                                # Also rotate to a new country if we're having trouble with the current one
+                                old_country = target_country
+                                
+                                # Choose a country we haven't tried recently
+                                available_countries = [c for c in [
+                                    "Austria", "Belgium", "Czechia", "Denmark", "Finland", "France", 
+                                    "Germany", "Greece", "Hungary", "Ireland", "Italy", "Netherlands", 
+                                    "Norway", "Poland", "Portugal", "Romania", "Slovakia", "Spain", 
+                                    "Sweden", "Switzerland", "United Kingdom"
+                                ] if c not in tried_countries]
+                                
+                                # If we've tried all countries, reset the tried countries set
+                                if not available_countries:
+                                    print("We've tried all countries. Resetting the country rotation.")
+                                    tried_countries = set([target_country])
+                                    available_countries = [c for c in [
+                                        "Austria", "Belgium", "Czechia", "Denmark", "Finland", "France", 
+                                        "Germany", "Greece", "Hungary", "Ireland", "Italy", "Netherlands", 
+                                        "Norway", "Poland", "Portugal", "Romania", "Slovakia", "Spain", 
+                                        "Sweden", "Switzerland", "United Kingdom"
+                                    ] if c != target_country]
+                                
+                                target_country = random.choice(available_countries)
+                                tried_countries.add(target_country)
+                                
+                                print(f"Switching target country from {old_country} to {target_country}")
+                                
+                                # Restart the browser with the new country
+                                if driver:
+                                    try:
+                                        driver.quit()
+                                    except:
+                                        pass
+                                driver = initialize_browser(target_country)
+                                first_run = True
+                                page_start_time = time.time()
+                                
+                                break  # Break out of the for loop to get a new set of products
+                        else:
+                            # Reset the counter if we found results
+                            no_results_counter = 0
+                        
+                        # Update the page start time after successful scraping
+                        page_start_time = time.time()
                         
                         # Wait a bit before next product to avoid rate limiting
                         time.sleep(random.uniform(2, 5))
@@ -361,42 +438,81 @@ def main():
                         print(f"Error processing product '{product_name}': {e}")
                         
                         # Check if browser is still alive
-                        try:
-                            driver.current_url  # This will throw an exception if the browser is closed
-                        except:
+                        if not is_browser_responsive(driver):
                             print("Browser appears to be closed. Restarting browser...")
                             if driver:
                                 try:
                                     driver.quit()
                                 except:
                                     pass  # Ignore errors when trying to quit a dead browser
-                            driver = initialize_browser()
+                            driver = initialize_browser(target_country)
                             first_run = True
+                            page_start_time = time.time()
                         
                         # Continue with next product
                         continue
+                
+                # Occasionally rotate country even if we're getting results (every 3-5 cycles)
+                if random.randint(1, 5) <= 2:  # 40% chance to rotate country
+                    old_country = target_country
                     
+                    # Choose a country we haven't tried recently
+                    available_countries = [c for c in [
+                        "Austria", "Belgium", "Czechia", "Denmark", "Finland", "France", 
+                        "Germany", "Greece", "Hungary", "Ireland", "Italy", "Netherlands", 
+                        "Norway", "Poland", "Portugal", "Romania", "Slovakia", "Spain", 
+                        "Sweden", "Switzerland", "United Kingdom"
+                    ] if c not in tried_countries]
+                    
+                    # If we've tried all countries, reset the tried countries set
+                    if not available_countries:
+                        print("We've tried all countries. Resetting the country rotation.")
+                        tried_countries = set([target_country])
+                        available_countries = [c for c in [
+                            "Austria", "Belgium", "Czechia", "Denmark", "Finland", "France", 
+                            "Germany", "Greece", "Hungary", "Ireland", "Italy", "Netherlands", 
+                            "Norway", "Poland", "Portugal", "Romania", "Slovakia", "Spain", 
+                            "Sweden", "Switzerland", "United Kingdom"
+                        ] if c != target_country]
+                    
+                    target_country = random.choice(available_countries)
+                    tried_countries.add(target_country)
+                    
+                    print(f"\nProactively rotating country from {old_country} to {target_country} for next cycle")
+                    
+                    # Restart the browser with the new country
+                    if driver:
+                        try:
+                            driver.quit()
+                        except:
+                            pass
+                    driver = initialize_browser(target_country)
+                
+                print("\n" + "="*50)
+                print(f"Completed scraping cycle at {time.strftime('%Y-%m-%d %H:%M:%S')} for {target_country}")
+                print(f"Waiting 10 seconds before starting next cycle...")
+                print("="*50 + "\n")
+                
+                # Wait 10 seconds before starting the next cycle
+                time.sleep(10)
+            
             except Exception as e:
                 logger.error(f"Browser error: {e}")
                 print(f"Browser error: {e}")
-            finally:
-                # Close the browser after processing all products
+                # Only quit the browser if we're exiting the program or if there's a critical error
                 if driver:
                     try:
                         driver.quit()
                     except:
                         pass  # Ignore errors when trying to quit
-                
-            print("\n" + "="*50)
-            print(f"Completed scraping cycle at {time.strftime('%Y-%m-%d %H:%M:%S')}")
-            print(f"Waiting 10 minutes before starting next cycle...")
-            print("="*50 + "\n")
-            
-            # Wait 10 minutes before starting the next cycle
-            time.sleep(600)
     
     except KeyboardInterrupt:
         print("\nScript stopped by user. Exiting gracefully...")
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
     except Exception as e:
         logger.error(f"Critical error in main loop: {e}")
         print(f"Critical error: {e}")

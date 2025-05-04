@@ -42,7 +42,7 @@ def send_lead_to_api(country, url, email, comparator):
         "email": email_value,
         "comparator": comparator,
         "notes": note_text,
-        "status": "New_just_discovered"
+        "status": "New_discovered"
     }
     
     try:
