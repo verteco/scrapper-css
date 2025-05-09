@@ -74,6 +74,9 @@ def scrape_all_urls(driver, product_name, first_run, target_country=None):
     try:
         print(f"Scraping all URLs for: {product_name[:20]}")
         
+        # Ensure window is minimized before navigation
+        driver.minimize_window()
+        
         # Navigate to Google homepage
         print(f"Navigating to Google homepage for product: {product_name}")
         driver.get("https://www.google.com")
@@ -256,15 +259,26 @@ def initialize_browser(target_country=None):
         options.add_argument("--disable-notifications")
         options.add_argument("--disable-popup-blocking")
         options.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6723.92 Safari/537.36")
+        options.add_argument("--start-minimized")  # Start Chrome minimized
+        options.add_argument("--window-position=-32000,-32000")  # Position window far off-screen initially
         
         # Add experimental options to avoid detection
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
         
-        # Initialize Chrome driver
+        # Create a custom Chrome driver class that starts minimized
+        class MinimizedChromeDriver(webdriver.Chrome):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.minimize_window()  # Minimize immediately upon creation
+        
+        # Initialize Chrome driver with our custom class
         service = ChromeService(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
-        driver.set_window_size(1920, 1080)
+        driver = MinimizedChromeDriver(service=service, options=options)
+        
+        # Double-ensure window is minimized and positioned off-screen
+        driver.set_window_position(-32000, -32000)  # Position far off-screen
+        driver.minimize_window()
         
         # Execute CDP commands to avoid detection
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
@@ -294,11 +308,29 @@ def initialize_browser(target_country=None):
         
         # Last resort fallback
         print("Critical error occurred. Using basic Chrome without any customization...")
-        options = Options()
-        service = ChromeService(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
-        print("WARNING: Running with basic Chrome configuration. No customization.")
-        return driver
+        try:
+            options = Options()
+            options.add_argument("--no-sandbox")
+            options.add_argument("--start-minimized")  # Start minimized even in fallback mode
+            options.add_argument("--window-position=-32000,-32000")  # Position far off-screen
+            
+            service = ChromeService(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=options)
+            driver.minimize_window()  # Ensure minimized
+            print("WARNING: Running with basic Chrome configuration. No customization.")
+            return driver
+        except Exception as fallback_error:
+            # If even the fallback fails, try one more time with absolute minimal options
+            logger.error(f"Fallback initialization failed: {fallback_error}")
+            print(f"Fallback initialization failed: {fallback_error}")
+            print("Attempting absolute minimal Chrome initialization...")
+            
+            options = Options()
+            options.add_argument("--start-minimized")
+            service = ChromeService(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=options)
+            driver.minimize_window()
+            return driver
 
 def is_browser_responsive(driver):
     """
@@ -309,6 +341,33 @@ def is_browser_responsive(driver):
         driver.current_url
         return True
     except Exception:
+        # Try multiple recovery methods before giving up
+        recovery_methods = [
+            # Method 1: Simple refresh
+            lambda d: (d.refresh(), time.sleep(1)),
+            # Method 2: Navigate to blank page
+            lambda d: (d.get("about:blank"), time.sleep(2)),
+            # Method 3: Execute JavaScript to stop loading
+            lambda d: (d.execute_script("window.stop();"), time.sleep(1)),
+            # Method 4: Execute simple JavaScript
+            lambda d: (d.execute_script("return navigator.userAgent;"), None),
+            # Method 5: Try to switch to default content
+            lambda d: (d.switch_to.default_content(), None)
+        ]
+        
+        for i, recovery_method in enumerate(recovery_methods, 1):
+            try:
+                print(f"Browser recovery attempt {i}/5...")
+                recovery_method(driver)
+                # Check if browser is now responsive
+                driver.current_url
+                print(f"Successfully recovered browser with method {i}")
+                return True
+            except Exception as e:
+                print(f"Recovery method {i} failed: {e}")
+                continue
+        
+        print("All browser recovery methods failed")
         return False
 
 def is_browser_stuck(driver, start_time, timeout=60):
@@ -318,6 +377,32 @@ def is_browser_stuck(driver, start_time, timeout=60):
     """
     if time.time() - start_time > timeout:
         print(f"Browser appears to be stuck on {driver.current_url} for more than {timeout} seconds")
+        
+        # Try multiple recovery methods before declaring it stuck
+        recovery_methods = [
+            # Method 1: Simple refresh
+            lambda d: (d.refresh(), time.sleep(2)),
+            # Method 2: Navigate to blank page and back
+            lambda d: (d.get("about:blank"), time.sleep(1), d.back(), time.sleep(2)),
+            # Method 3: Execute JavaScript to stop loading and reload
+            lambda d: (d.execute_script("window.stop(); location.reload(true);"), time.sleep(3)),
+            # Method 4: Clear cookies and cache via JavaScript
+            lambda d: (d.execute_script("localStorage.clear(); sessionStorage.clear();"), d.refresh(), time.sleep(2))
+        ]
+        
+        for i, recovery_method in enumerate(recovery_methods, 1):
+            try:
+                print(f"Stuck browser recovery attempt {i}/{len(recovery_methods)}...")
+                recovery_method(driver)
+                # Check if we can interact with the page after recovery
+                driver.execute_script("return document.readyState")
+                print(f"Successfully recovered stuck browser with method {i}")
+                return False
+            except Exception as e:
+                print(f"Stuck recovery method {i} failed: {e}")
+                continue
+        
+        print("All stuck browser recovery methods failed")
         return True
     return False
 
@@ -359,17 +444,74 @@ def main():
                 for product_name in products:
                     try:
                         # Check if browser is responsive and not stuck
-                        if not is_browser_responsive(driver) or is_browser_stuck(driver, page_start_time):
-                            print("Browser is unresponsive or stuck. Restarting browser...")
-                            if driver:
-                                try:
-                                    driver.quit()
-                                except:
-                                    pass  # Ignore errors when trying to quit a dead browser
-                            driver = initialize_browser(target_country)
-                            first_run = True
-                            page_start_time = time.time()
+                        browser_unresponsive = not is_browser_responsive(driver)
+                        browser_stuck = is_browser_stuck(driver, page_start_time)
                         
+                        if browser_unresponsive or browser_stuck:
+                            # Try one final extreme recovery attempt before restarting
+                            try:
+                                print("Browser is still unresponsive or stuck. Attempting extreme recovery...")
+                                # Try a series of last-resort recovery methods
+                                
+                                # 1. Try to clear all alerts
+                                try:
+                                    driver.switch_to.alert.accept()
+                                except:
+                                    pass
+                                
+                                # 2. Try to get a completely fresh page
+                                driver.get("data:,")  # Minimal valid page
+                                time.sleep(1)
+                                
+                                # 3. Try to execute a complex JavaScript operation
+                                driver.execute_script("""
+                                    // Clear all intervals and timeouts
+                                    for (let i = 0; i < 1000; i++) {
+                                        clearInterval(i);
+                                        clearTimeout(i);
+                                    }
+                                    // Clear storage
+                                    try { localStorage.clear(); } catch(e) {}
+                                    try { sessionStorage.clear(); } catch(e) {}
+                                    // Reset history
+                                    try { history.go(0); } catch(e) {}
+                                    return true;
+                                """)
+                                
+                                # 4. Check if we can still interact with the browser
+                                time.sleep(2)
+                                driver.execute_script("return window.navigator.userAgent")
+                                
+                                print("Successfully recovered browser with extreme recovery methods")
+                                # Reset the page start time
+                                page_start_time = time.time()
+                                
+                                # Continue with next product instead of trying to use this browser for the current product
+                                print(f"Skipping product '{product_name}' after extreme recovery")
+                                continue
+                                
+                            except Exception as e:
+                                # We've tried everything, only now do we restart the browser
+                                print(f"Extreme recovery failed: {e}. Reluctantly restarting browser...")
+                                
+                                # Count browser restarts
+                                browser_restart_count = browser_restart_count + 1 if 'browser_restart_count' in locals() else 1
+                                print(f"Browser restart count: {browser_restart_count}")
+                                
+                                # Only restart if we haven't restarted too many times in this session
+                                if browser_restart_count <= 5:  # Limit browser restarts
+                                    if driver:
+                                        try:
+                                            driver.quit()
+                                        except:
+                                            pass  # Ignore errors when trying to quit a dead browser
+                                    driver = initialize_browser(target_country)
+                                    first_run = True
+                                    page_start_time = time.time()
+                                    driver.minimize_window()  # Ensure window is minimized after restart
+                                else:
+                                    print("Too many browser restarts. Skipping this product instead.")
+                                    continue
                         # Scrape URLs from Google Shopping
                         urls = scrape_all_urls(driver, product_name, first_run, target_country)
                         
@@ -420,6 +562,7 @@ def main():
                                 driver = initialize_browser(target_country)
                                 first_run = True
                                 page_start_time = time.time()
+                                driver.minimize_window()  # Ensure window is minimized after restart
                                 
                                 break  # Break out of the for loop to get a new set of products
                         else:
@@ -448,7 +591,8 @@ def main():
                             driver = initialize_browser(target_country)
                             first_run = True
                             page_start_time = time.time()
-                        
+                            driver.minimize_window()  # Ensure window is minimized after restart
+                            
                         # Continue with next product
                         continue
                 
@@ -487,6 +631,7 @@ def main():
                         except:
                             pass
                     driver = initialize_browser(target_country)
+                    driver.minimize_window()  # Ensure window is minimized after restart
                 
                 print("\n" + "="*50)
                 print(f"Completed scraping cycle at {time.strftime('%Y-%m-%d %H:%M:%S')} for {target_country}")
@@ -504,7 +649,7 @@ def main():
                     try:
                         driver.quit()
                     except:
-                        pass  # Ignore errors when trying to quit
+                        pass  # Ignore errors when trying to quit a dead browser
     
     except KeyboardInterrupt:
         print("\nScript stopped by user. Exiting gracefully...")
